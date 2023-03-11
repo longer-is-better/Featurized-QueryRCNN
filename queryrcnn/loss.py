@@ -73,15 +73,15 @@ class SetCriterion(nn.Module):
             empty_weight[-1] = self.eos_coef
             self.register_buffer('empty_weight', empty_weight)
 
-    def loss_labels(self, outputs, targets, indices, num_boxes, log=False):
+    def loss_labels(self, outputs, targets, indices, num_boxes, targets_with_unknow, indices_with_unknow, num_boxes_with_un, log=False):
         """Classification loss (NLL)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
         assert 'pred_logits' in outputs
         src_logits = outputs['pred_logits']
 
-        idx = self._get_src_permutation_idx(indices)
-        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+        idx = self._get_src_permutation_idx(indices_with_unknow)
+        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets_with_unknow, indices_with_unknow)])
         target_classes = torch.full(src_logits.shape[:2], self.num_classes + 1,
                                     dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
@@ -100,7 +100,7 @@ class SetCriterion(nn.Module):
                 alpha=self.focal_loss_alpha,
                 gamma=self.focal_loss_gamma,
                 reduction="sum",
-            ) / num_boxes
+            ) / num_boxes_with_un
             losses = {'loss_ce': class_loss}
         else:
             loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
@@ -112,7 +112,7 @@ class SetCriterion(nn.Module):
         return losses
 
 
-    def loss_boxes(self, outputs, targets, indices, num_boxes):
+    def loss_boxes(self, outputs, targets, indices, num_boxes, targets_with_unknow, indices_with_unknow, num_boxes_with_un):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
            targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
            The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
@@ -149,13 +149,13 @@ class SetCriterion(nn.Module):
         tgt_idx = torch.cat([tgt for (_, tgt) in indices])
         return batch_idx, tgt_idx
 
-    def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
+    def get_loss(self, loss, outputs, targets, indices, num_boxes, targets_with_unknow, indices_with_unknow, num_boxes_with_un, **kwargs):
         loss_map = {
             'labels': self.loss_labels,
             'boxes': self.loss_boxes,
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
-        return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
+        return loss_map[loss](outputs, targets, indices, num_boxes, targets_with_unknow, indices_with_unknow, num_boxes_with_un, **kwargs)
 
     def forward(self, outputs, targets):
         """ This performs the loss computation.
@@ -165,8 +165,8 @@ class SetCriterion(nn.Module):
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
 
-        num_boxes_o = sum(len(t["labels"]) for t in targets)
-        num_boxes_o = torch.as_tensor([num_boxes_o], dtype=torch.float, device=next(iter(outputs.values())).device)
+        num_boxes = sum(len(t["labels"]) for t in targets) # num_boxes without unknown
+        num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
 
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
@@ -177,23 +177,26 @@ class SetCriterion(nn.Module):
         feature_list = [feature for feature in outputs["pred_features"]]
 
         # matched
+        import copy
         sim_matched_loss = 0
+        indices_with_unknow = copy.deepcopy(indices)
+        targets_with_unknow = copy.deepcopy(targets)
         similarities = torch.cosine_similarity(outputs["pred_features"].permute(1, 0, 2), self.text_features.unsqueeze(dim=0), dim=-1).reshape(-1, 100, 80)  # HARD CODE
         for index_i in range(len(targets)):
             sim_matched_loss += (1 - sum(similarities[index_i][indices[index_i][0], indices[index_i][1]]))
             unmatched_value, _ = similarities[index_i].max(dim=1)
-            unknown_index = torch.nonzero(unmatched_value > self.threshold_unknown).squeeze().to('cpu')
+            unknown_index = torch.nonzero(unmatched_value > self.threshold_unknown).squeeze(-1).to('cpu')
             unknown_index = torch.Tensor([i for i in unknown_index if i not in indices[index_i][0]]).to(int)
-            
-            indices[index_i][0] = torch.concat([indices[index_i][0], unknown_index])
-            indices[index_i][1] = torch.concat([indices[index_i][1], torch.full((len(unknown_index),), len(indices[index_i][1]))])
-            targets[index_i]['labels'] = torch.concat([targets[index_i]['labels'], torch.full((len(unknown_index),), 80).to(self.device)])  # HARD CODE
-            # targets[index_i]['boxes'] = torch.concat([targets[index_i]['boxes'], outputs[index_i]["pred_boxes"][unknown_index]])  # HARD CODE
+            # unknown_index = torch.tensor([35, 86, 90, 94, 96]).to(int)
+            indices_with_unknow[index_i][0] = torch.concat([indices[index_i][0], unknown_index])
+            indices_with_unknow[index_i][1] = torch.concat([indices[index_i][1], torch.full((len(unknown_index),), len(indices[index_i][1]))])
+            targets_with_unknow[index_i]['labels'] = torch.concat([targets[index_i]['labels'], torch.full((len(unknown_index),), 80).to(self.device)])  # HARD CODE
+            # targets_with_unknow[index_i]['boxes'] = torch.concat([targets[index_i]['boxes'], outputs["pred_boxes"][index_i][unknown_index]])  # HARD CODE
         # ===================================================================wxf20230311
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
-        num_boxes = sum(len(t["labels"]) for t in targets)
-        num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
+        num_boxes_with_un = sum(len(t["labels"]) for t in targets_with_unknow)
+        num_boxes_with_un = torch.as_tensor([num_boxes_with_un], dtype=torch.float, device=next(iter(outputs.values())).device)
         if is_dist_avail_and_initialized():
             torch.distributed.all_reduce(num_boxes)
         num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
@@ -201,9 +204,9 @@ class SetCriterion(nn.Module):
         # Compute all the requested losses
         losses = {}
         for loss in self.losses:
-            losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
+            losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes, targets_with_unknow, indices_with_unknow, num_boxes_with_un))
 
-        losses['loss_clip'] = sim_matched_loss / num_boxes_o
+        losses['loss_clip'] = sim_matched_loss / num_boxes
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
@@ -217,7 +220,7 @@ class SetCriterion(nn.Module):
                     if loss == 'labels':
                         # Logging is enabled only for the last layer
                         kwargs = {'log': False}
-                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
+                    l_dict = self.get_loss(loss, outputs, targets, indices, num_boxes, targets_with_unknow, indices_with_unknow, num_boxes_with_un, **kwargs)
                     l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
