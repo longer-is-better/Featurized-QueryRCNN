@@ -28,6 +28,36 @@ class SetCriterion(nn.Module):
             losses: list of all the losses to be applied. See get_loss for list of available losses.
         """
         super().__init__()
+        import clip
+
+        self.device = cfg.MODEL.DEVICE
+        self.clip_model, _ = clip.load("ViT-B/32", device=self.device)
+
+        self.threshold_unknown = 0.5  # HARD CODE
+        text_list = [
+            "airplane", "bicycle", "bird", "boat", "bottle", "bus", "car", "cat",
+            "chair", "cow", "dining table", "dog", "horse", "motorcycle", "person",
+            "potted plant", "sheep", "couch", "train", "tv",
+
+            "truck", "traffic light", "fire hydrant", "stop sign", "parking meter",
+            "bench", "elephant", "bear", "zebra", "giraffe",
+            "backpack", "umbrella", "handbag", "tie", "suitcase",
+            "microwave", "oven", "toaster", "sink", "refrigerator",
+
+            "frisbee", "skis", "snowboard", "sports ball", "kite",
+            "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+            "banana", "apple", "sandwich", "orange", "broccoli",
+            "carrot", "hot dog", "pizza", "donut", "cake",
+
+            "bed", "toilet", "laptop", "mouse",
+            "remote", "keyboard", "cell phone", "book", "clock",
+            "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+            "wine glass", "cup", "fork", "knife", "spoon", "bowl"
+        ]
+
+        with torch.no_grad():
+            self.text_features = self.clip_model.encode_text(clip.tokenize(text_list).to(self.device)).to(torch.float)
+
         self.cfg = cfg
         self.num_classes = num_classes
         self.matcher = matcher
@@ -52,7 +82,7 @@ class SetCriterion(nn.Module):
 
         idx = self._get_src_permutation_idx(indices)
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
-        target_classes = torch.full(src_logits.shape[:2], self.num_classes,
+        target_classes = torch.full(src_logits.shape[:2], self.num_classes + 1,
                                     dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
 
@@ -60,7 +90,7 @@ class SetCriterion(nn.Module):
             src_logits = src_logits.flatten(0, 1)
             # prepare one_hot target.
             target_classes = target_classes.flatten(0, 1)
-            pos_inds = torch.nonzero(target_classes != self.num_classes, as_tuple=True)[0]
+            pos_inds = torch.nonzero(target_classes != self.num_classes + 1, as_tuple=True)[0]
             labels = torch.zeros_like(src_logits)
             labels[pos_inds, target_classes[pos_inds]] = 1
             # comp focal loss.
@@ -134,10 +164,31 @@ class SetCriterion(nn.Module):
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
+
+        num_boxes_o = sum(len(t["labels"]) for t in targets)
+        num_boxes_o = torch.as_tensor([num_boxes_o], dtype=torch.float, device=next(iter(outputs.values())).device)
+
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs_without_aux, targets)
+
+        # ===================================================================wxf20230311
+        feature_list = [feature for feature in outputs["pred_features"]]
+
+        # matched
+        sim_matched_loss = 0
+        similarities = torch.cosine_similarity(outputs["pred_features"].permute(1, 0, 2), self.text_features.unsqueeze(dim=0), dim=-1).reshape(-1, 100, 80)  # HARD CODE
+        for index_i in range(len(targets)):
+            sim_matched_loss += (1 - sum(similarities[index_i][indices[index_i][0], indices[index_i][1]]))
+            unmatched_value, _ = similarities[index_i].max(dim=1)
+            unknown_index = torch.nonzero(unmatched_value > self.threshold_unknown).squeeze()
+            unknown_index = torch.Tensor([i for i in unknown_index if i not in indices[index_i][0]]).to(int)
+            
+            indices[index_i][0] = torch.concat([indices[index_i][0], unknown_index])
+            indices[index_i][1] = torch.concat([indices[index_i][1], torch.full((len(unknown_index),), len(indices[index_i][1]))])
+            targets[index_i]['labels'] = torch.concat([targets[index_i]['labels'], torch.full((len(unknown_index),), 80).to(self.device)])  # HARD CODE
+        # ===================================================================wxf20230311
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
@@ -150,6 +201,8 @@ class SetCriterion(nn.Module):
         losses = {}
         for loss in self.losses:
             losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
+
+        losses['loss_clip'] = sim_matched_loss / num_boxes_o
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
@@ -258,4 +311,4 @@ class HungarianMatcher(nn.Module):
 
         sizes = [len(v["boxes"]) for v in targets]
         indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
-        return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
+        return [[torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)] for i, j in indices]

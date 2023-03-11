@@ -36,6 +36,7 @@ class DynamicHead(nn.Module):
 
     def __init__(self, cfg, roi_input_shape):
         super().__init__()
+        self.feat_text = nn.Linear(256,512) # align feature dim to clip output
 
         # Build RoI.
         box_pooler = self._init_box_pooler(cfg, roi_input_shape)
@@ -108,25 +109,35 @@ class DynamicHead(nn.Module):
     def forward(self, features, init_bboxes, init_features, position_encoding=[]):
         inter_class_logits = []
         inter_pred_bboxes = []
+        inter_pred_features = []
 
         bs = len(features[0])
         bboxes = init_bboxes
 
         # init_features = init_features[None].repeat(1, bs, 1)
-        proposal_features = init_features.clone()
+        # proposal_features = init_features.clone()
+        prop_features = init_features
         for rcnn_head in self.head_series:
-            class_logits, pred_bboxes, proposal_features = rcnn_head(features, bboxes, proposal_features, self.box_pooler, [])
+            class_logits, pred_bboxes, pred_features = rcnn_head(features, bboxes, prop_features, self.box_pooler, [])
             # print("cls_logs", class_logits.shape, pred_bboxes.shape, proposal_features.shape)
             # ---- self.return_intermediate: True ---
             if self.return_intermediate:
                 inter_class_logits.append(class_logits)
                 inter_pred_bboxes.append(pred_bboxes)
+                inter_pred_features.append(pred_features)
             bboxes = pred_bboxes.detach()
+            prop_features = pred_features.detach()
 
         if self.return_intermediate:
-            return torch.stack(inter_class_logits), torch.stack(inter_pred_bboxes)
+            inter_pred_features = torch.stack(inter_pred_features)
+            inter_pred_features = self.feat_text(inter_pred_features)
+        else:
+            pred_features = self.feat_text(pred_features)
 
-        return class_logits[None], pred_bboxes[None]
+        if self.return_intermediate:
+            return torch.stack(inter_class_logits), torch.stack(inter_pred_bboxes), inter_pred_features
+
+        return class_logits[None], pred_bboxes[None], pred_features[None]
 
 
 class RCNNHead(nn.Module):

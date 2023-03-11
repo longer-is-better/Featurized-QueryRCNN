@@ -45,12 +45,14 @@ class QueryRCNN(nn.Module):
         no_object_weight = cfg.MODEL.SparseRCNN.NO_OBJECT_WEIGHT
         self.deep_supervision = cfg.MODEL.SparseRCNN.DEEP_SUPERVISION
         self.use_focal = cfg.MODEL.SparseRCNN.USE_FOCAL
+        # clip_loss_weight = cfg.MODEL.SparseRCNN.CLIP_LOSS_WEIGHT
 
         # Build Criterion.
         matcher = HungarianMatcher(cfg=cfg,
                                    cost_class=class_weight, 
                                    cost_bbox=l1_weight, 
                                    cost_giou=giou_weight,
+                                #    clip_loss_weight=clip_loss_weight,
                                    use_focal=self.use_focal)
         weight_dict = {"loss_ce": class_weight, "loss_bbox": l1_weight, "loss_giou": giou_weight}
         if self.deep_supervision:
@@ -142,9 +144,9 @@ class QueryRCNN(nn.Module):
         init_boxes = proposal_boxes.detach()
         proposal_features = torch.stack([x.proposal_feats for x in proposals])
         # Prediction.
-        outputs_class, outputs_coord = self.head(features, init_boxes, proposal_features, pos_rcnn)
+        outputs_class, outputs_coord, outputs_features = self.head(features, init_boxes, proposal_features, pos_rcnn)
         
-        output = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
+        output = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_features': outputs_features[-1]}
 
         if self.deep_supervision:
             output['aux_outputs'] = [{'pred_logits': a, 'pred_boxes': b}
