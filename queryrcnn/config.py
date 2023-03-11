@@ -35,6 +35,7 @@ def add_sparsercnn_config(cfg):
     cfg.MODEL.SparseRCNN.L1_WEIGHT = 5.0
     cfg.MODEL.SparseRCNN.DEEP_SUPERVISION = True
     cfg.MODEL.SparseRCNN.NO_OBJECT_WEIGHT = 0.1
+    cfg.MODEL.SparseRCNN.CLIP_LOSS_WEIGHT = 1.0
 
     # Focal Loss.
     cfg.MODEL.SparseRCNN.USE_FOCAL = True

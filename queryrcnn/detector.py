@@ -45,16 +45,16 @@ class QueryRCNN(nn.Module):
         no_object_weight = cfg.MODEL.SparseRCNN.NO_OBJECT_WEIGHT
         self.deep_supervision = cfg.MODEL.SparseRCNN.DEEP_SUPERVISION
         self.use_focal = cfg.MODEL.SparseRCNN.USE_FOCAL
-        # clip_loss_weight = cfg.MODEL.SparseRCNN.CLIP_LOSS_WEIGHT
+        clip_loss_weight = cfg.MODEL.SparseRCNN.CLIP_LOSS_WEIGHT
 
         # Build Criterion.
         matcher = HungarianMatcher(cfg=cfg,
                                    cost_class=class_weight, 
                                    cost_bbox=l1_weight, 
                                    cost_giou=giou_weight,
-                                #    clip_loss_weight=clip_loss_weight,
+                                   clip_loss_weight=clip_loss_weight,
                                    use_focal=self.use_focal)
-        weight_dict = {"loss_ce": class_weight, "loss_bbox": l1_weight, "loss_giou": giou_weight}
+        weight_dict = {"loss_ce": class_weight, "loss_bbox": l1_weight, "loss_giou": giou_weight, "loss_clip": clip_loss_weight}
         if self.deep_supervision:
             aux_weight_dict = {}
             for i in range(self.num_heads - 1):

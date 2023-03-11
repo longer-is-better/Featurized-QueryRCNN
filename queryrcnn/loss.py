@@ -182,12 +182,13 @@ class SetCriterion(nn.Module):
         for index_i in range(len(targets)):
             sim_matched_loss += (1 - sum(similarities[index_i][indices[index_i][0], indices[index_i][1]]))
             unmatched_value, _ = similarities[index_i].max(dim=1)
-            unknown_index = torch.nonzero(unmatched_value > self.threshold_unknown).squeeze()
+            unknown_index = torch.nonzero(unmatched_value > self.threshold_unknown).squeeze().to('cpu')
             unknown_index = torch.Tensor([i for i in unknown_index if i not in indices[index_i][0]]).to(int)
             
             indices[index_i][0] = torch.concat([indices[index_i][0], unknown_index])
             indices[index_i][1] = torch.concat([indices[index_i][1], torch.full((len(unknown_index),), len(indices[index_i][1]))])
             targets[index_i]['labels'] = torch.concat([targets[index_i]['labels'], torch.full((len(unknown_index),), 80).to(self.device)])  # HARD CODE
+            # targets[index_i]['boxes'] = torch.concat([targets[index_i]['boxes'], outputs[index_i]["pred_boxes"][unknown_index]])  # HARD CODE
         # ===================================================================wxf20230311
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
@@ -230,7 +231,7 @@ class HungarianMatcher(nn.Module):
     while the others are un-matched (and thus treated as non-objects).
     """
 
-    def __init__(self, cfg, cost_class: float = 1, cost_bbox: float = 1, cost_giou: float = 1, use_focal: bool = False):
+    def __init__(self, cfg, cost_class: float = 1, cost_bbox: float = 1, cost_giou: float = 1, clip_loss_weight = 1, use_focal: bool = False):
         """Creates the matcher
         Params:
             cost_class: This is the relative weight of the classification error in the matching cost
@@ -240,6 +241,7 @@ class HungarianMatcher(nn.Module):
         super().__init__()
         self.cost_class = cost_class
         self.cost_bbox = cost_bbox
+        self.clip_loss_weight = clip_loss_weight
         self.cost_giou = cost_giou
         self.use_focal = use_focal
         if self.use_focal:
